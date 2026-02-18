@@ -1,79 +1,90 @@
 """
 JSON Exporter
 
-Export threads to a JSON file.
+Export threads to a JSON file with streaming writes.
+Threads are written incrementally to avoid holding all data in memory.
 """
 
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, IO, List, Optional
 
 from langgraph_export.exporters.base import BaseExporter, ExportStats, ThreadData
+
+_JSON_INDENT = 2
 
 
 class JSONExporter(BaseExporter):
     """
-    Export threads to JSON file.
+    Export threads to JSON file with streaming writes.
 
-    Creates a JSON file with all threads, metadata, and checkpoints.
+    Writes each thread to disk as it's exported, rather than
+    buffering everything in memory. The output format is
+    backward-compatible with the original buffered exporter.
     """
 
     def __init__(
         self,
         source_url: str,
         output_file: str = "threads_backup.json",
-        indent: int = 2,
     ):
-        """
-        Initialize JSON exporter.
-
-        Args:
-            source_url: Source LangGraph deployment URL
-            output_file: Path to output JSON file
-            indent: JSON indentation level (default: 2)
-        """
         super().__init__(source_url)
         self.output_file = Path(output_file)
-        self.indent = indent
-        self._threads: List[Dict[str, Any]] = []
+        self._file: Optional[IO[str]] = None
+        self._thread_count = 0
 
     async def connect(self) -> None:
-        """No connection needed for JSON export."""
-        pass
+        """Open the file and write the JSON header."""
+        self.output_file.parent.mkdir(parents=True, exist_ok=True)
+        self._file = open(self.output_file, "w", encoding="utf-8")
+        self._thread_count = 0
+        # Start the JSON object with threads array
+        self._file.write("{\n")
+        self._file.write(f'  "threads": [\n')
 
     async def export_thread(self, thread: ThreadData) -> None:
-        """
-        Add thread to export buffer.
+        """Write a single thread to the file immediately."""
+        if not self._file:
+            raise RuntimeError("Exporter not connected. Call connect() first.")
+        if self._thread_count > 0:
+            self._file.write(",\n")
 
-        Args:
-            thread: Thread data to export
-        """
-        self._threads.append(thread.to_dict())
+        thread_json = json.dumps(
+            thread.to_dict(), indent=_JSON_INDENT, ensure_ascii=False, default=str,
+        )
+        # Indent each line of the thread JSON by 4 spaces (inside the array)
+        indented = "\n".join(f"    {line}" for line in thread_json.splitlines())
+        self._file.write(indented)
+
+        self._thread_count += 1
         self.stats.threads_exported += 1
         self.stats.checkpoints_exported += len(thread.history)
 
     async def finalize(self) -> None:
-        """Save all threads to JSON file."""
-        export_data = {
-            "export_date": datetime.now().isoformat(),
-            "source": self.source_url,
-            "total_threads": len(self._threads),
-            "total_checkpoints": self.stats.checkpoints_exported,
-            "threads": self._threads,
-        }
+        """Close the threads array and write metadata footer."""
+        if not self._file:
+            return
 
-        # Ensure parent directory exists
-        self.output_file.parent.mkdir(parents=True, exist_ok=True)
+        # Close the threads array
+        if self._thread_count > 0:
+            self._file.write("\n")
+        self._file.write("  ],\n")
 
-        # Write JSON file
-        self.output_file.write_text(
-            json.dumps(export_data, indent=self.indent, ensure_ascii=False, default=str)
-        )
+        # Write metadata at the end (known only after all threads are exported)
+        self._file.write(f'  "export_date": {json.dumps(datetime.now().isoformat())},\n')
+        self._file.write(f'  "source": {json.dumps(self.source_url)},\n')
+        self._file.write(f'  "total_threads": {self.stats.threads_exported},\n')
+        self._file.write(f'  "total_checkpoints": {self.stats.checkpoints_exported}\n')
+        self._file.write("}\n")
+
+        self._file.flush()
 
     async def close(self) -> None:
-        """Clear internal buffer."""
-        self._threads.clear()
+        """Close the file handle."""
+        if self._file:
+            self._file.close()
+            self._file = None
 
     def get_file_size_mb(self) -> float:
         """Get output file size in MB."""
@@ -83,40 +94,23 @@ class JSONExporter(BaseExporter):
 
     @staticmethod
     def load_threads(file_path: str) -> List[ThreadData]:
-        """
-        Load threads from JSON file.
-
-        Args:
-            file_path: Path to JSON file
-
-        Returns:
-            List of ThreadData objects
-        """
+        """Load threads from JSON file."""
         path = Path(file_path)
         if not path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"), strict=False)
         threads = data.get("threads", [])
-
         return [ThreadData.from_dict(t) for t in threads]
 
     @staticmethod
     def get_export_info(file_path: str) -> Dict[str, Any]:
-        """
-        Get export metadata from JSON file.
-
-        Args:
-            file_path: Path to JSON file
-
-        Returns:
-            Dictionary with export date, source, and counts
-        """
+        """Get export metadata from JSON file."""
         path = Path(file_path)
         if not path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"), strict=False)
         return {
             "export_date": data.get("export_date"),
             "source": data.get("source"),
