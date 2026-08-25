@@ -1,3 +1,5 @@
+
+
 # LangGraph Threads Export Tool
 
 A Python tool to export threads, checkpoints, and conversation history from LangGraph Cloud deployments. Save your data to JSON files, PostgreSQL databases, or migrate directly to another deployment.
@@ -87,7 +89,8 @@ Store threads in your own database:
 ```bash
 python migrate_threads.py \
   --source-url https://my-deployment.langgraph.app \
-  --export-postgres
+  --export-postgres \
+  --database-url postgresql://user:password@localhost:5432/dbname
 ```
 
 This creates two tables:
